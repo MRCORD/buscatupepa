@@ -1,151 +1,250 @@
 import streamlit as st
+import requests
 import pandas as pd
-import math
-from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+import re
+import time
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+from dotenv import load_dotenv
+import os
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+load_dotenv()
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+st.title("Busca tu Pepa 💊")
 
-st.header(f'GDP in {to_year}', divider='gray')
+backend_url = os.environ.get("BACKEND_URL")
 
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
+@st.cache_data(ttl=600)
+def mongo_consult(consult_body):
+    try:
+        response = requests.post(f"{backend_url}/v1/consult_mongo", json=consult_body)
+        
+        if response.status_code == 200:
+            response_json = response.json()
+            return response_json.get('documents', [])
         else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+            return []
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+        return []
+    
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# Define the consultation bodies for MongoDB
+consult_unique_drugs = {
+    "db": "health",
+    "collection": "medicines",
+    "aggregation": [
+        {"$group": {
+                "_id": {
+                    "searchTerm": "$searchTerm",
+                    "concent": "$producto.concent",
+                    "nombreFormaFarmaceutica": "$producto.nombreFormaFarmaceutica"
+                }}},
+        {"$sort": {
+                "_id.searchTerm": 1,
+                "_id.concent": 1,
+                "_id.nombreFormaFarmaceutica": 1
+            }},
+        {"$project": {
+                "_id": 0,
+                "searchTerm": "$_id.searchTerm",
+                "concent": "$_id.concent",
+                "nombreFormaFarmaceutica": "$_id.nombreFormaFarmaceutica"
+            }}
+    ]
+}
+
+consult_unique_distritos = {
+    "db": "peru",
+    "collection": "districts",
+    "aggregation": [
+        {"$project": {"_id": 0, "descripcion": 1}},
+        {"$sort": {"descripcion": 1}}
+    ]
+}
+
+
+# Function to extract the numerical part of the concentration using regular expressions
+def get_numerical_concent(concent):
+    numbers = re.findall(r'\d+\.?\d*', concent)  # Find all numbers (integers or decimals)
+    return float(numbers[0]) if numbers else 0  # Convert the first found number to float, default to 0 if none found
+
+
+
+# Fetch unique drug and district names
+unique_drugs = mongo_consult(consult_unique_drugs)
+
+# Assuming unique_drugs is a list of dictionaries as described
+for drug in unique_drugs:
+    # Concatenate the required strings and add them under the new key 'formOption'
+    drug['formOption'] = f"{drug['searchTerm']} {drug['concent']} [{drug['nombreFormaFarmaceutica']}]"
+
+
+
+# Sorting the list with a custom key that handles numerical sorting for `concent`
+unique_drugs = sorted(unique_drugs, key=lambda x: (
+    x['searchTerm'],
+    x['nombreFormaFarmaceutica'],
+    get_numerical_concent(x['concent'])
+))
+
+
+unique_drugs_names = [doc['formOption'] for doc in unique_drugs]
+
+unique_distritos = mongo_consult(consult_unique_distritos)
+unique_distritos_names = sorted([doc['descripcion'] for doc in unique_distritos])
+
+
+def display_chat_messages() -> None:
+    """Print message history
+    @returns None
+    """
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"],avatar="🧑‍⚕️"):
+            st.markdown(message["content"])
+
+def stream_data(string):
+    for word in string.split(" "):
+        yield word + " "
+        time.sleep(0.09)
+    
+col1, col2, col3 = st.columns([0.2, 0.5, 0.2])
+
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if 'concentrations_shown' not in st.session_state:
+    st.session_state['concentrations_shown'] = False 
+    st.session_state['clicked_concentration'] = None
+
+# Display chat messages from history on app rerun
+display_chat_messages()
+
+# Initialize session state variables if they don't exist
+if 'greetings_shown' not in st.session_state:
+    st.session_state['greetings_shown'] = False
+    
+if 'form_submitted' not in st.session_state:
+    st.session_state['form_submitted'] = False
+
+
+if not st.session_state.greetings_shown:
+    
+    intro_message = "¡Hola! Soy tu asistente virtual de búsqueda de medicinas en Lima. Estoy aquí para ayudarte a encontrar las medicinas que necesitas. ¿En qué puedo ayudarte hoy?"
+    
+    with st.chat_message("assistant", avatar="🧑‍⚕️"):
+        st.write_stream(stream_data(intro_message))
+        
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": intro_message})
+    st.session_state.greetings_shown = True
+    
+if not st.session_state.form_submitted:
+    
+    consult_form = st.empty()
+    
+    with consult_form.form(key='consult_form'):
+    
+        selector_drugs = st.selectbox('Medicina', unique_drugs_names, index=None, placeholder="Selecciona la medicina...")
+        selector_distritos = st.selectbox('Distrito', unique_distritos_names, index=None, placeholder="Selecciona el distrito...")
+        submit = st.form_submit_button('Consultar')
+        
+    if submit:
+        matching_item = [drug for drug in unique_drugs if drug['formOption'] == selector_drugs]
+        
+        requested_search = {
+            "selected_drug": matching_item[0]['searchTerm'],
+            "concent": matching_item[0]['concent'],
+            "nombreFormaFarmaceutica": matching_item[0]['nombreFormaFarmaceutica'],
+            "selected_distrito": selector_distritos
+        }
+        
+        st.session_state.requested_search = requested_search
+        
+        
+        with st.chat_message("user"):
+            form_request = f"Quiero buscar información sobre {requested_search['selected_drug']} en el distrito {requested_search['selected_distrito']}"
+            st.write_stream(stream_data(form_request))
+        
+        st.session_state.form_submitted = True
+        st.session_state.messages.append({"role": "user", "content": form_request})
+        
+        consult_form.empty()
+        
+        
+
+if 'db_consulted' not in st.session_state:
+    st.session_state['db_consulted'] = False
+    
+if 'concentrations_loaded' not in st.session_state:
+    st.session_state['concentrations_loaded'] = False  
+    
+
+if not st.session_state.db_consulted and 'requested_search' in st.session_state:
+    
+    with st.chat_message("assistant", avatar="🧑‍⚕️"):
+        st.write_stream(stream_data("Déjame buscar la información que necesitas..."))
+        st.session_state.messages.append({"role": "assistant", "content": "Déjame buscar la información que necesitas..."})
+        
+        
+    #Query MongoDb
+    find_filtered_drug_body = {
+        "db": "health",
+        "collection": "drugs",
+        "query": {
+            "searchTerm": st.session_state.requested_search['selected_drug'],
+            "producto.concent": st.session_state.requested_search['concent'],
+            "producto.nombreFormaFarmaceutica": st.session_state.requested_search['nombreFormaFarmaceutica'],
+            "comercio.locacion.distrito": st.session_state.requested_search['selected_distrito']
+        }
+    }    
+
+    filtered_drugs = mongo_consult(find_filtered_drug_body)
+    
+    #Retrieve drugs
+    with st.chat_message("assistant", avatar="🧑‍⚕️"):
+        total_results_message = f"""
+        Hay {len(filtered_drugs)} resultados en total \n
+        Dejame mostrarte donde las puedes encontrar más barato:
+        """
+        st.write_stream(stream_data(total_results_message))
+        st.session_state.messages.append({"role": "assistant", "content": total_results_message})
+        
+
+    #Store retrieved drugs
+    st.session_state.search_results = filtered_drugs
+    
+    sorted_filtered_drugs = sorted(
+    filtered_drugs,
+    key=lambda d: float(d.get('producto', {}).get('precios', {}).get('precio2', float('inf'))),
+    # Using float('inf') as a default value to handle missing keys or values
+    )
+    
+    top_3_filtered_drugs = sorted_filtered_drugs[:3]
+    
+    st.session_state['top3'] = top_3_filtered_drugs
+    
+        
+    for drug in top_3_filtered_drugs:
+        drug_name = drug['producto']['nombreProducto']
+        drug_concent = drug['producto']['concent']
+        drug_forma = drug['producto']['nombreFormaFarmaceutica']
+        drug_price = drug['producto']['precios']['precio2']
+        
+        drug_comercio = drug['comercio']['nombreComercial']
+        drug_ubicacion = drug['comercio']['locacion']['direccion']
+        
+        with st.chat_message("assistant", avatar="🧑‍⚕️"):
+
+            drug_message = f"""
+            🔍 {drug_name} {drug_concent} [{drug_forma}] - Precio: S/. {drug_price} \n
+            {drug_comercio}: {drug_ubicacion}
+            """
+
+            st.write_stream(stream_data(drug_message))
+            st.session_state.messages.append({"role": "assistant", "content": drug_message})
+    
+    st.session_state.db_consulted = True
